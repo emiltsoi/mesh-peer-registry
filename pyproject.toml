@@ -1,0 +1,25 @@
+[project]
+name = "mesh-peer-registry"
+version = "0.1.0"
+description = "Shared peer registry for hermes-mesh and openclaw-mesh"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=41.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/emiltsoi/mesh-peer-registry"
+Repository = "https://github.com/emiltsoi/mesh-peer-registry.git"
+
+[project.scripts]
+mesh-peer-registry = "mesh_peer_registry.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mesh_peer_registry"]
