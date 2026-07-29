@@ -1,18 +1,40 @@
 [project]
 name = "mesh-peer-registry"
 version = "0.1.0"
-description = "Shared peer registry for hermes-mesh and openclaw-mesh"
+description = "Shared, language-agnostic peer registry for hermes-mesh and openclaw-mesh with Ed25519 signing."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [{name = "Emil Tsoi"}]
+keywords = ["mesh", "peer", "registry", "ed25519", "aiohttp", "openclaw", "hermes"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "aiohttp>=3.9",
     "cryptography>=41.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
 [project.urls]
 Homepage = "https://github.com/emiltsoi/mesh-peer-registry"
 Repository = "https://github.com/emiltsoi/mesh-peer-registry.git"
+Issues = "https://github.com/emiltsoi/mesh-peer-registry/issues"
 
 [project.scripts]
 mesh-peer-registry = "mesh_peer_registry.cli:main"
@@ -23,3 +45,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["mesh_peer_registry"]
+license-files = ["LICENSE"]
