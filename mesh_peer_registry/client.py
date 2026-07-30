@@ -67,19 +67,46 @@ class RegistryClient:
         url: str,
         role: str = "agent",
         description: str = "",
+        ttl: int | None = None,
     ) -> dict:
-        payload = {
+        payload: dict[str, object] = {
             "name": name,
             "url": url,
             "public_key": self.public_key_pem,
             "role": role,
             "description": description,
         }
-        return self._request("POST", "/register", payload, payload)
+        if ttl is not None:
+            payload["ttl"] = ttl
+        result = self._request("POST", "/register", payload, payload)
+        # Refresh last_seen after registration so a peer with short TTL stays alive.
+        self.refresh(name)
+        return result
 
-    def list_peers(self) -> list[PeerInfo]:
-        data = self._request("GET", "/peers")
+    def list_peers(
+        self,
+        role: str | None = None,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> list[PeerInfo]:
+        qs = []
+        if role:
+            qs.append(f"role={role}")
+        if limit:
+            qs.append(f"limit={limit}")
+        if offset:
+            qs.append(f"offset={offset}")
+        path = "/peers"
+        if qs:
+            path += "?" + "&".join(qs)
+        data = self._request("GET", path)
         return [PeerInfo(**p) for p in data.get("peers", [])]
+
+    def refresh(self, name: str) -> dict:
+        sig_payload = {"name": name, "action": "refresh"}
+        return self._request(
+            "POST", f"/peers/{name}/refresh", signature_payload=sig_payload
+        )
 
     def get_peer(self, name: str) -> PeerInfo | None:
         try:
