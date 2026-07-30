@@ -146,6 +146,17 @@ async def _reaper_task(app: web.Application) -> None:
             pass
 
 
+async def _reaper_context(app: web.Application):
+    """Start the reaper on startup and cancel it on cleanup."""
+    task = asyncio.create_task(_reaper_task(app))
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 @web.middleware
 async def admin_token_middleware(request: web.Request, handler):
     if request.path in ("/health", "/metrics"):
@@ -167,5 +178,5 @@ def create_app(store_path: str | None = None) -> web.Application:
     app.router.add_delete("/peers/{name}", delete_peer)
     app.router.add_get("/health", health)
     app.router.add_get("/metrics", metrics)
-    app.on_startup.append(lambda app: asyncio.create_task(_reaper_task(app)))
+    app.cleanup_ctx.append(_reaper_context)
     return app
