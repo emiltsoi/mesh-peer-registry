@@ -41,12 +41,34 @@ def main() -> None:
         default=60.0,
         help="Interval in seconds to reap expired peers",
     )
+    parser.add_argument(
+        "--behind-proxy",
+        action="store_true",
+        help="Trust X-Forwarded-Proto and X-Forwarded-For headers",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=0,
+        help="Max /register requests per IP per minute (0 = unlimited)",
+    )
+    parser.add_argument(
+        "--hsts",
+        action="store_true",
+        help="Emit Strict-Transport-Security headers for HTTPS responses",
+    )
     args = parser.parse_args()
 
     if args.admin_token:
         os.environ["MESH_REGISTRY_ADMIN_TOKEN"] = args.admin_token
     if args.reaper_interval:
         os.environ["MESH_REGISTRY_REAPER_INTERVAL"] = str(args.reaper_interval)
+    if args.behind_proxy:
+        os.environ["MESH_REGISTRY_BEHIND_PROXY"] = "1"
+    if args.rate_limit:
+        os.environ["MESH_REGISTRY_RATE_LIMIT"] = str(args.rate_limit)
+    if args.hsts:
+        os.environ["MESH_REGISTRY_HSTS"] = "1"
 
     app = create_app(os.path.expanduser(args.store))
     ssl_context = None
