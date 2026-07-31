@@ -27,14 +27,16 @@ The signing protocol uses compact, deterministic, sorted-key JSON, making it str
 
 ## Quick start
 
-Install and run the server:
+Install and run the server over plain HTTP for local development:
 
 ```bash
 pip install mesh-peer-registry
-mesh-peer-registry --port 8646 --store ~/.mesh/registry.sqlite
+MESH_REGISTRY_ALLOW_INSECURE=1 mesh-peer-registry --port 8646 --store ~/.mesh/registry.sqlite
 ```
 
 The server will listen on `http://127.0.0.1:8646` and store peers in `~/.mesh/registry.sqlite`.
+
+For production, serve over HTTPS with `--ssl-cert` / `--ssl-key` and set `MESH_REGISTRY_HSTS=1` to emit `Strict-Transport-Security` headers.
 
 ### CLI options
 
@@ -46,6 +48,17 @@ The server will listen on `http://127.0.0.1:8646` and store peers in `~/.mesh/re
 | `--reaper-interval` | `60.0` | Interval in seconds between TTL reaping passes. |
 | `--admin-token` | — | Token required for `/health` and `/metrics`. |
 | `--ssl-cert` / `--ssl-key` | — | Optional TLS certificate and key for HTTPS. |
+| `--behind-proxy` | `false` | Trust `X-Forwarded-Proto` and `X-Forwarded-For` from a reverse proxy. |
+| `--rate-limit` | `0` | Maximum registrations per IP per minute (`0` disables). |
+| `--hsts` | `false` | Emit `Strict-Transport-Security` for HTTPS responses. |
+
+Environment variables mirror the flags and middleware settings:
+
+- `MESH_REGISTRY_ALLOW_INSECURE` — set to `1` to allow plain HTTP requests.
+- `MESH_REGISTRY_BEHIND_PROXY` — set to `1` to enable proxy header handling.
+- `MESH_REGISTRY_RATE_LIMIT` — per-IP registration limit per minute (`0` disables).
+- `MESH_REGISTRY_HSTS` — set to `1` to emit HSTS headers.
+- `MESH_REGISTRY_PIN` — when set, the client verifies the server certificate SPKI matches this SHA-256 hex digest.
 
 ## API
 
@@ -68,7 +81,24 @@ from mesh_peer_registry.crypto import generate_keypair
 from mesh_peer_registry.client import RegistryClient
 
 private, public = generate_keypair()
-client = RegistryClient("http://127.0.0.1:8646", private, public)
+
+# For plain HTTP development, allow_insecure=True is required unless the
+# server is configured with MESH_REGISTRY_ALLOW_INSECURE=1.
+client = RegistryClient(
+    "http://127.0.0.1:8646",
+    private,
+    public,
+    allow_insecure=True,
+    pin=None,
+)
+
+# For HTTPS production with certificate pinning:
+# client = RegistryClient(
+#     "https://registry.example.com",
+#     private,
+#     public,
+#     pin="sha256-hex-of-server-certificate-spki",
+# )
 
 client.register(
     "agent0",
@@ -95,7 +125,13 @@ Receivers fetch the sender's public key from the registry and verify the `X-Mesh
 from mesh_peer_registry.crypto import verify_message
 from mesh_peer_registry.client import RegistryClient
 
-client = RegistryClient("http://127.0.0.1:8646", "", "")
+# Read-only lookup can use an empty keypair and allow_insecure for local HTTP.
+client = RegistryClient(
+    "http://127.0.0.1:8646",
+    "",
+    "",
+    allow_insecure=True,
+)
 peer = client.get_peer("agent0")
 
 # body is the raw request body; signature is from the X-Mesh-Signature header.
