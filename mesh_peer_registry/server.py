@@ -210,7 +210,8 @@ async def secure_middleware(request: web.Request, handler):
         if not is_secure:
             return web.json_response({"error": "https required"}, status=400)
     response = await handler(request)
-    if request.secure or (behind_proxy and request.headers.get("X-Forwarded-Proto") == "https"):
+    hsts_enabled = os.getenv("MESH_REGISTRY_HSTS", "").lower() in ("1", "true", "yes")
+    if hsts_enabled and (request.secure or (behind_proxy and request.headers.get("X-Forwarded-Proto") == "https")):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
