@@ -251,3 +251,38 @@ class TestRegistryServer(AioHTTPTestCase):
     async def test_get_missing_returns_404(self):
         resp = await self.client.request("GET", "/peers/nobody")
         assert resp.status == 404
+
+    async def test_hsts_header_emitted_when_enabled_and_secure(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MESH_REGISTRY_HSTS": "1",
+                "MESH_REGISTRY_BEHIND_PROXY": "1",
+                "MESH_REGISTRY_ALLOW_INSECURE": "1",
+            },
+        ):
+            resp = await self.client.request(
+                "GET",
+                "/peers",
+                headers={"X-Forwarded-Proto": "https"},
+            )
+            assert resp.status == 200
+            assert "Strict-Transport-Security" in resp.headers
+            assert "max-age=31536000" in resp.headers["Strict-Transport-Security"]
+
+    async def test_hsts_header_not_emitted_when_disabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MESH_REGISTRY_HSTS": "",
+                "MESH_REGISTRY_BEHIND_PROXY": "1",
+                "MESH_REGISTRY_ALLOW_INSECURE": "1",
+            },
+        ):
+            resp = await self.client.request(
+                "GET",
+                "/peers",
+                headers={"X-Forwarded-Proto": "https"},
+            )
+            assert resp.status == 200
+            assert "Strict-Transport-Security" not in resp.headers
