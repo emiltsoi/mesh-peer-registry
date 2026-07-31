@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -15,14 +18,33 @@ from .store import SqliteStore
 
 __all__ = ["create_app"]
 
+logger = logging.getLogger(__name__)
+
 AppKeyStore = web.AppKey("store", SqliteStore)
 
 REGISTRY_FIELDS = {"name", "url", "public_key", "role", "description", "ttl"}
 REQUIRED_FIELDS = {"name", "url", "public_key"}
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+_rate_limit_state: dict[str, tuple[int, float]] = {}
+
 
 def _admin_token() -> str:
     return os.getenv("MESH_REGISTRY_ADMIN_TOKEN", "")
+
+
+def _validate_name(name: str) -> bool:
+    return bool(name and _NAME_RE.match(name))
+
+
+def _validate_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _validate_public_key(public_key: str) -> bool:
+    return isinstance(public_key, str) and "BEGIN PUBLIC KEY" in public_key and "END PUBLIC KEY" in public_key
 
 
 async def _json_body(request: web.Request) -> dict:
@@ -40,6 +62,13 @@ async def register(request: web.Request) -> web.Response:
             {"error": f"missing fields: {sorted(missing)}"}, status=400
         )
 
+    if not _validate_name(body.get("name", "")):
+        return web.json_response({"error": "invalid name"}, status=400)
+    if not _validate_url(body.get("url", "")):
+        return web.json_response({"error": "invalid url"}, status=400)
+    if not _validate_public_key(body.get("public_key", "")):
+        return web.json_response({"error": "invalid public_key"}, status=400)
+
     sig = request.headers.get("X-Mesh-Signature", "")
     if not sig:
         return web.json_response(
@@ -53,6 +82,7 @@ async def register(request: web.Request) -> web.Response:
 
     store: SqliteStore = request.app[AppKeyStore]
     store.put(PeerInfo(**payload))
+    logger.info("registered peer name=%s url=%s", payload["name"], payload["url"])
     return web.json_response({"ok": True, "peer": payload})
 
 
@@ -101,6 +131,7 @@ async def delete_peer(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid signature"}, status=401)
 
     store.delete(name)
+    logger.info("deregistered peer name=%s", name)
     return web.json_response({"ok": True})
 
 
@@ -123,6 +154,7 @@ async def refresh_peer(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid signature"}, status=401)
 
     store.touch(name)
+    logger.info("refreshed peer name=%s", name)
     return web.json_response({"ok": True})
 
 
@@ -167,9 +199,52 @@ async def admin_token_middleware(request: web.Request, handler):
     return await handler(request)
 
 
+@web.middleware
+async def secure_middleware(request: web.Request, handler):
+    allow_insecure = os.getenv("MESH_REGISTRY_ALLOW_INSECURE", "").lower() in ("1", "true", "yes")
+    behind_proxy = os.getenv("MESH_REGISTRY_BEHIND_PROXY", "").lower() in ("1", "true", "yes")
+    if not allow_insecure:
+        is_secure = request.secure
+        if behind_proxy:
+            is_secure = is_secure or request.headers.get("X-Forwarded-Proto") == "https"
+        if not is_secure:
+            return web.json_response({"error": "https required"}, status=400)
+    response = await handler(request)
+    if request.secure or (behind_proxy and request.headers.get("X-Forwarded-Proto") == "https"):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+def _rate_limit_key(request: web.Request) -> str | None:
+    behind_proxy = os.getenv("MESH_REGISTRY_BEHIND_PROXY", "").lower() in ("1", "true", "yes")
+    if behind_proxy:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.remote
+
+
+@web.middleware
+async def rate_limit_middleware(request: web.Request, handler):
+    raw = os.getenv("MESH_REGISTRY_RATE_LIMIT", "0")
+    limit = int(raw) if raw.isdigit() else 0
+    if limit > 0 and request.path == "/register":
+        key = _rate_limit_key(request)
+        if key:
+            now = time.time()
+            count, window = _rate_limit_state.get(key, (0, 0))
+            if now - window > 60:
+                count, window = 0, now
+            count += 1
+            _rate_limit_state[key] = (count, window)
+            if count > limit:
+                return web.json_response({"error": "rate limited"}, status=429)
+    return await handler(request)
+
+
 def create_app(store_path: str | None = None) -> web.Application:
     store_path = store_path or os.path.expanduser("~/.mesh/registry.sqlite")
-    app = web.Application(middlewares=[admin_token_middleware])
+    app = web.Application(middlewares=[secure_middleware, admin_token_middleware, rate_limit_middleware])
     app[AppKeyStore] = SqliteStore(Path(store_path))
     app.router.add_post("/register", register)
     app.router.add_get("/peers", list_peers)

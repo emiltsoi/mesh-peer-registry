@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from typing import Union
 
+from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -19,6 +21,7 @@ __all__ = [
     "canonicalize_payload",
     "sign_json",
     "verify_json",
+    "spki_hash_from_cert",
 ]
 
 
@@ -63,8 +66,11 @@ def verify_message(
     """Verify a base64-encoded signature against a message and public key."""
     if isinstance(message, str):
         message = message.encode("utf-8")
-    public_key = _load_public_key(public_key_pem)
-    signature = base64.b64decode(signature_b64.encode("utf-8"))
+    try:
+        public_key = _load_public_key(public_key_pem)
+        signature = base64.b64decode(signature_b64.encode("utf-8"))
+    except Exception:
+        return False
     try:
         public_key.verify(signature, message)
         return True
@@ -85,3 +91,13 @@ def sign_json(private_key_pem: str, payload: dict) -> str:
 def verify_json(public_key_pem: str, payload: dict, signature_b64: str) -> bool:
     """Verify a signature over a JSON-serializable payload."""
     return verify_message(public_key_pem, canonicalize_payload(payload), signature_b64)
+
+
+def spki_hash_from_cert(der_cert: bytes) -> str:
+    """Return the SHA-256 hex digest of a certificate's Subject Public Key Info (SPKI)."""
+    cert = x509.load_der_x509_certificate(der_cert)
+    spki = cert.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(spki).hexdigest()

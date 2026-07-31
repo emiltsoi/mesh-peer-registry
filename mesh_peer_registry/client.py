@@ -2,13 +2,47 @@
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import urllib.error
 import urllib.request
 
-from .crypto import sign_json
+from .crypto import sign_json, spki_hash_from_cert
 from .models import PeerInfo
 
-__all__ = ["RegistryClient"]
+__all__ = ["RegistryClient", "RegistryClientError"]
+
+
+class _PinningSSLContext(ssl.SSLContext):
+    """SSL context that optionally pins the server certificate's SPKI."""
+
+    def __init__(self, pin: str | None = None):
+        super().__init__(ssl.PROTOCOL_TLS_CLIENT)
+        self._pin = (pin or "").lower().strip()
+        if self._pin:
+            self.load_default_certs()
+
+    def wrap_socket(self, *args, **kwargs):
+        sock = super().wrap_socket(*args, **kwargs)
+        if self._pin:
+            cert = sock.getpeercert(binary_form=True)
+            if not cert:
+                raise ssl.SSLError("no peer certificate for pinning")
+            got = spki_hash_from_cert(cert)
+            if got != self._pin:
+                raise ssl.SSLError(
+                    f"certificate pinning mismatch: expected {self._pin[:16]}..., got {got[:16]}..."
+                )
+        return sock
+
+
+class RegistryClientError(Exception):
+    """Registry client error with HTTP status and server message."""
+
+    def __init__(self, status: int, message: object):
+        self.status = status
+        self.message = message
+        super().__init__(f"Registry HTTP {status}: {message}")
 
 
 class RegistryClient:
@@ -20,11 +54,25 @@ class RegistryClient:
         private_key_pem: str,
         public_key_pem: str,
         timeout: float = 10.0,
+        pin: str | None = None,
+        allow_insecure: bool = False,
     ) -> None:
-        self.registry_url = registry_url.rstrip("/")
+        url = registry_url.strip()
+        if url.lower().startswith("http://"):
+            env_allow = os.getenv("MESH_REGISTRY_ALLOW_INSECURE", "").lower()
+            if not allow_insecure and env_allow not in ("1", "true", "yes"):
+                raise RegistryClientError(
+                    0,
+                    "insecure http registry URL; set MESH_REGISTRY_ALLOW_INSECURE=1 or allow_insecure=True",
+                )
+        self.registry_url = url.rstrip("/")
         self.private_key_pem = private_key_pem
         self.public_key_pem = public_key_pem
         self.timeout = timeout
+        self._pin = (pin or os.getenv("MESH_REGISTRY_PIN", "")).lower().strip()
+        self._context: ssl.SSLContext | None = None
+        if self.registry_url.lower().startswith("https://"):
+            self._context = _PinningSSLContext(self._pin) if self._pin else ssl.create_default_context()
 
     def _request(
         self,
@@ -48,8 +96,11 @@ class RegistryClient:
         req = urllib.request.Request(
             url, data=data, headers=headers, method=method
         )
+        kwargs: dict[str, object] = {"timeout": self.timeout}
+        if self._context is not None:
+            kwargs["context"] = self._context
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, **kwargs) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8")
@@ -57,9 +108,7 @@ class RegistryClient:
                 detail = json.loads(body)
             except json.JSONDecodeError:
                 detail = body
-            raise RegistryClientError(
-                status=exc.code, message=detail
-            ) from exc
+            raise RegistryClientError(status=exc.code, message=detail) from exc
 
     def register(
         self,
@@ -122,12 +171,3 @@ class RegistryClient:
         return self._request(
             "DELETE", f"/peers/{name}", signature_payload=sig_payload
         )
-
-
-class RegistryClientError(Exception):
-    """Registry client error with HTTP status and server message."""
-
-    def __init__(self, status: int, message: object):
-        self.status = status
-        self.message = message
-        super().__init__(f"Registry HTTP {status}: {message}")
