@@ -1,6 +1,6 @@
 [project]
 name = "mesh-peer-registry"
-version = "0.1.1"
+version = "0.1.2"
 description = "Shared, language-agnostic peer registry for hermes-mesh and openclaw-mesh with Ed25519 signing."
 readme = "README.md"
 license = {text = "MIT"}
