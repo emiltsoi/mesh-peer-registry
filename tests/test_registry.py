@@ -39,7 +39,7 @@ class TestCrypto(unittest.TestCase):
         assert verify_message(public, "hello mesh", sig)
 
     def test_verify_fails_with_wrong_key(self):
-        private, public = generate_keypair()
+        private, _public = generate_keypair()
         _, wrong_public = generate_keypair()
         sig = sign_message(private, "hello")
         assert not verify_message(wrong_public, "hello", sig)
@@ -62,18 +62,17 @@ class TestCrypto(unittest.TestCase):
         assert a == b
 
     def test_verify_message_rejects_invalid_base64(self):
-        private, public = generate_keypair()
+        _private, public = generate_keypair()
         assert not verify_message(public, "hello", "not-base64!!!")
 
     def test_verify_message_rejects_invalid_public_key(self):
-        private, public = generate_keypair()
+        private, _public = generate_keypair()
         sig = sign_message(private, "hello")
         assert not verify_message("not-a-public-key", "hello", sig)
 
     def test_spki_hash_from_cert_matches_public_key(self):
         from cryptography import x509
         from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes
 
         private, public = generate_keypair()
 
