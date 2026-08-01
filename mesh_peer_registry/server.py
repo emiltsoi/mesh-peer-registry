@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -174,8 +175,8 @@ async def _reaper_task(app: web.Application) -> None:
         await asyncio.sleep(interval)
         try:
             store.reap_expired()
-        except Exception:
-            pass
+        except sqlite3.Error:
+            logger.exception("reaper failed")
 
 
 async def _reaper_context(app: web.Application):

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
-from typing import Union
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -15,13 +15,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 __all__ = [
-    "generate_keypair",
-    "sign_message",
-    "verify_message",
     "canonicalize_payload",
+    "generate_keypair",
     "sign_json",
-    "verify_json",
+    "sign_message",
     "spki_hash_from_cert",
+    "verify_json",
+    "verify_message",
 ]
 
 
@@ -51,7 +51,7 @@ def _load_public_key(public_key_pem: str) -> Ed25519PublicKey:
     return serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
 
 
-def sign_message(private_key_pem: str, message: Union[str, bytes]) -> str:
+def sign_message(private_key_pem: str, message: str | bytes) -> str:
     """Sign a message and return a base64-encoded signature."""
     if isinstance(message, str):
         message = message.encode("utf-8")
@@ -61,7 +61,7 @@ def sign_message(private_key_pem: str, message: Union[str, bytes]) -> str:
 
 
 def verify_message(
-    public_key_pem: str, message: Union[str, bytes], signature_b64: str
+    public_key_pem: str, message: str | bytes, signature_b64: str
 ) -> bool:
     """Verify a base64-encoded signature against a message and public key."""
     if isinstance(message, str):
@@ -69,7 +69,7 @@ def verify_message(
     try:
         public_key = _load_public_key(public_key_pem)
         signature = base64.b64decode(signature_b64.encode("utf-8"))
-    except Exception:
+    except (ValueError, binascii.Error):
         return False
     try:
         public_key.verify(signature, message)
