@@ -32,4 +32,4 @@ jobs:
       - name: Lint with ruff
         run: |
           pip install ruff
-          ruff check mesh_peer_registry tests
+          ruff check mesh_core mesh_peer_registry tests
