@@ -72,8 +72,8 @@ def _registry_lock(path: Path):
 
 
 def _hydrate(entries: list[dict], path: Path) -> None:
-    global _LOCKED, _LOADED, _MTIME
-    _LOCKED = set()
+    global _LOADED, _MTIME
+    _LOCKED.clear()
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -87,29 +87,90 @@ def _hydrate(entries: list[dict], path: Path) -> None:
     _MTIME = _registry_mtime(path)
 
 
+def _read_entries_strict(path: Path) -> tuple[list[dict], bool]:
+    """Read registry entries, reporting corrupt/unreadable state.
+
+    Returns ``(entries, failed)``. ``failed`` is True when the file exists but
+    could not be read as a valid JSON list.
+    """
+    if not path.exists():
+        return [], False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return [], True
+    if not text.strip():
+        return [], False
+    try:
+        data = json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return [], True
+    if not isinstance(data, list):
+        return [], True
+    return [entry for entry in data if isinstance(entry, dict)], False
+
+
+def _read_entries(path: Path) -> list[dict]:
+    """Read registry entries; tolerate a missing or corrupt file."""
+    entries, _ = _read_entries_strict(path)
+    return entries
+
+
+def _write_entries(entries: list[dict], path: Path) -> None:
+    """Atomically write registry entries (tmp file + os.replace + parent fsync)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix="closed-threads-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(entries, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        # Durability: fsync the parent directory so the rename itself is
+        # persisted across power loss, not just the file contents.
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:  # pragma: no cover - dir fsync unsupported on this FS
+            pass
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _backup_corrupt(path: Path) -> Path | None:
+    """Back up a corrupt registry file to ``<path>.corrupt-<ts>``.
+
+    Best-effort: returns the backup path on success, None on failure.
+    """
+    if not path.exists():
+        return None
+    backup = Path(f"{path}.corrupt-{time.time()}")
+    try:
+        shutil.copy2(path, backup)
+    except OSError:
+        return None
+    return backup
+
+
 def _load(path: Path) -> None:
     if not path.exists():
         _hydrate([], path)
         return
-    try:
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
-            _hydrate([], path)
-            return
-        data = json.loads(text)
-    except (OSError, json.JSONDecodeError) as exc:
+    entries, failed = _read_entries_strict(path)
+    if failed:
         logger.warning(
-            "[mesh] closed-threads registry UNAVAILABLE — enforcement disabled: %s", exc
+            "[mesh] closed-threads registry UNAVAILABLE — enforcement disabled: %s", path
         )
-        _LOADED = False
-        return
-    if not isinstance(data, list):
-        logger.warning(
-            "[mesh] closed-threads registry UNAVAILABLE — enforcement disabled: not a list"
-        )
-        _LOADED = False
-        return
-    _hydrate(data, path)
+    _hydrate(entries, path)
 
 
 def _maybe_reload(path: Path) -> None:
@@ -129,8 +190,17 @@ def _maybe_reload(path: Path) -> None:
 def is_closed(anchor: str, *, vault_path: str | Path | None = None) -> bool:
     """Return True if `anchor` is a closed thread."""
     path = _registry_path(vault_path)
-    _maybe_reload(path)
-    return not _LOADED or anchor in _LOCKED
+    try:
+        with _registry_lock(path):
+            _maybe_reload(path)
+            return _LOADED and anchor in _LOCKED
+    except (PermissionError, OSError) as exc:
+        logger.warning(
+            "[mesh] closed-threads registry UNAVAILABLE — enforcement disabled: %s (%s)",
+            path,
+            exc,
+        )
+        return False
 
 
 def record(anchor: str, closed_by: str, *, vault_path: str | Path | None = None) -> None:
@@ -141,17 +211,19 @@ def record(anchor: str, closed_by: str, *, vault_path: str | Path | None = None)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with _registry_lock(path):
-        _load(path)
-        entries: list[dict] = []
-        if path.exists():
-            try:
-                text = path.read_text(encoding="utf-8")
-                if text.strip():
-                    data = json.loads(text)
-                    if isinstance(data, list):
-                        entries = data
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("[mesh] failed to read closed-threads registry: %s", exc)
+        entries, failed = _read_entries_strict(path)
+        if failed:
+            backup = _backup_corrupt(path)
+            if backup:
+                logger.warning(
+                    "[mesh] corrupt closed-threads registry %s backed up to %s",
+                    path,
+                    backup,
+                )
+            else:
+                logger.warning(
+                    "[mesh] failed to back up corrupt closed-threads registry %s", path
+                )
 
         if anchor not in {e.get("anchor_task_id") for e in entries if isinstance(e, dict)}:
             entries.append(
@@ -161,16 +233,19 @@ def record(anchor: str, closed_by: str, *, vault_path: str | Path | None = None)
                     "closed_by": closed_by,
                 }
             )
+            _write_entries(entries, path)
 
-        try:
-            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".closed-threads-")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(entries, f, indent=2)
-            shutil.move(tmp, path)
-        except OSError as exc:
-            logger.warning("[mesh] failed to write closed-threads registry: %s", exc)
+        _hydrate(entries, path)
 
+    logger.info("[mesh] thread closed %s (closed_by=%s)", anchor, closed_by)
+
+
+def load(*, vault_path: str | Path | None = None) -> list[dict]:
+    """Load registry entries from disk."""
+    path = _registry_path(vault_path)
+    entries = _read_entries(path)
     _hydrate(entries, path)
+    return entries
 
 
 def list_closed(*, vault_path: str | Path | None = None) -> list[str]:
@@ -187,7 +262,7 @@ def clear(*, vault_path: str | Path | None = None) -> None:
                 path.unlink()
             except OSError:
                 pass
-    global _LOCKED, _LOADED, _MTIME  # noqa: PLW0602
     _LOCKED.clear()
+    global _LOADED, _MTIME
     _LOADED = False
     _MTIME = None
