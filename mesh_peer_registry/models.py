@@ -1,30 +1,10 @@
-"""Data models for the mesh peer registry."""
+"""Data models for the mesh peer registry.
+
+This module is a thin re-export from mesh_core for backward compatibility.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from mesh_core.models import PeerInfo
 
-
-@dataclass
-class PeerInfo:
-    """Public peer record held by the registry."""
-
-    name: str
-    url: str
-    public_key: str
-    role: str = "agent"
-    description: str = ""
-    ttl: int = 0
-    created_at: float = 0.0
-    last_seen: float = 0.0
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "url": self.url,
-            "public_key": self.public_key,
-            "role": self.role,
-            "description": self.description,
-            "ttl": self.ttl,
-            "created_at": self.created_at,
-            "last_seen": self.last_seen,
-        }
+__all__ = ["PeerInfo"]
