@@ -31,6 +31,7 @@ from mesh_core.exceptions import (
     ThreadClosed,
 )
 from mesh_core.identity import IdentityVault, MeshIdentity
+from mesh_core.models import PeerInfo
 from mesh_core.outbox import (
     OutboxEntry,
     append,
@@ -38,6 +39,7 @@ from mesh_core.outbox import (
     clean,
     list_entries,
 )
+from mesh_core.registry import RegistryClient, RegistryClientError
 from mesh_core.replay import ReplayWindow
 from mesh_core.threads import clear, is_closed, list_closed, record
 
@@ -55,6 +57,9 @@ __all__ = [
     "MeshError",
     "MeshIdentity",
     "OutboxEntry",
+    "PeerInfo",
+    "RegistryClient",
+    "RegistryClientError",
     "ReplayWindow",
     "SignatureError",
     "ThreadClosed",
