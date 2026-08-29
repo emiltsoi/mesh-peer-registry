@@ -1,6 +1,6 @@
 # mesh-peer-registry
 
-A small, shared, language-agnostic peer registry for the mesh network used by [`hermes-mesh`](https://github.com/emiltsoi/hermes-mesh) and [`openclaw-mesh`](https://github.com/emiltsoi/openclaw-mesh).
+A small, shared, language-agnostic peer registry for the mesh network used by [`hermes-mesh`](https://github.com/emiltsoi/hermes-mesh), [`openclaw-mesh`](https://github.com/emiltsoi/openclaw-mesh), and [`diploid-mesh`](https://github.com/emiltsoi/diploid-mesh).
 
 Peers register with an Ed25519 public key and a webhook URL, then discover each other over a simple HTTP API. The server never holds private keys.
 
@@ -14,6 +14,22 @@ Peers register with an Ed25519 public key and a webhook URL, then discover each 
 - Mesh messages are signed by the sender and verified by the receiver against the sender's public key from the registry.
 
 The signing protocol uses compact, deterministic, sorted-key JSON, making it straightforward to implement in other runtimes (e.g. the Node.js implementation in `openclaw-mesh`).
+
+## Cross-harness mesh
+
+`mesh-peer-registry` is the shared backbone that lets agents from different harnesses talk to each other:
+
+- **Hermes** agents speak through [`hermes-mesh`](https://github.com/emiltsoi/hermes-mesh).
+- **OpenClaw** agents speak through [`openclaw-mesh`](https://github.com/emiltsoi/openclaw-mesh).
+- **diploid-agent** agents speak through [`diploid-mesh`](https://github.com/emiltsoi/diploid-mesh).
+
+All three share:
+
+- The bracketed `[mesh]` envelope format and Ed25519 wire signatures.
+- The same local vault layout (`mesh/agents/<name>/identity.yaml`).
+- The same optional [`mesh-peer-registry`](https://github.com/emiltsoi/mesh-peer-registry) server for multi-host discovery.
+
+This means a Hermes fleet agent can `mesh_send` to a diploid agent, and the diploid agent can reply to an OpenClaw agent, with the same identity and envelope format everywhere.
 
 ## Features
 
