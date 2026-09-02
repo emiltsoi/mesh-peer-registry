@@ -135,10 +135,7 @@ def parse_envelope(text: str) -> MeshEnvelope:
     # Token-loop parser is the primary path (order-independent, 0.1.8).
     # The regex fast-path would partially match a prefix of a non-canonical
     # header and treat remaining tokens as body — so we always walk the loop.
-    try:
-        fields, body_text = _parse_token_loop(text)
-    except EnvelopeError:
-        raise
+    fields, body_text = _parse_token_loop(text)
     if not fields.get("from") or not fields.get("to") or not fields.get("id"):
         raise EnvelopeError("Malformed mesh envelope header")
     sender = validate_envelope_token(fields["from"], "sender")
