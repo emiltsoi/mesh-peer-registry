@@ -100,6 +100,73 @@ def test_build_and_round_trip() -> None:
     assert parsed == env
 
 
+def test_session_tokens_round_trip() -> None:
+    """0.1.8: [session] + [from_session] are optional envelope tokens."""
+    env = MeshEnvelope(
+        sender="vesper",
+        recipient="vera",
+        msg_id="msg-s1",
+        action="do",
+        reply="yes",
+        session="review",
+        from_session="chat",
+        body="Hello session",
+    )
+    text = env.build()
+    # Canonical order: [from][to][id][session][from_session][action][reply]
+    assert "[to:vera][id:msg-s1][session:review][from_session:chat][action:do]" in text
+    parsed = parse_envelope(text)
+    assert parsed.session == "review"
+    assert parsed.from_session == "chat"
+    assert parsed == env
+
+
+def test_session_tokens_optional_and_backward_compatible() -> None:
+    """Absent session tokens parse as None (today's behavior unchanged)."""
+    env = MeshEnvelope(
+        sender="hermes-0",
+        recipient="diploid-0",
+        msg_id="msg-1",
+        action="do",
+        reply="yes",
+        body="Hello",
+    )
+    text = env.build()
+    assert "[session:" not in text
+    parsed = parse_envelope(text)
+    assert parsed.session is None
+    assert parsed.from_session is None
+
+
+def test_session_tokens_any_order_parsed() -> None:
+    """0.1.8 token-loop parser: receivers accept any token order."""
+    # session before action, from_session before session (non-canonical order)
+    text = (
+        "[mesh][from:vesper][to:vera][id:msg-2]"
+        "[action:do][from_session:chat][session:review][reply:yes] body"
+    )
+    parsed = parse_envelope(text)
+    assert parsed.session == "review"
+    assert parsed.from_session == "chat"
+    assert parsed.action == "do"
+    assert parsed.reply == "yes"
+    assert parsed.body == "body"
+
+
+def test_session_token_validation() -> None:
+    """Session names validate against the SAME token regex (no # allowed)."""
+    # A # in a session name is invalid (the shared regex excludes it).
+    with pytest.raises(EnvelopeError):
+        parse_envelope(
+            "[mesh][from:a][to:b][id:m][session:rev#iew][action:do][reply:yes]"
+        )
+    # A colon is allowed in the token set.
+    env = parse_envelope(
+        "[mesh][from:a][to:b][id:m][session:review:gate][action:do][reply:yes]"
+    )
+    assert env.session == "review:gate"
+
+
 def test_strip_envelope() -> None:
     text = "[mesh][from:hermes-0][to:diploid-0][id:msg-1][action:do][reply:yes] Hello"
     assert strip_envelope(text) == "Hello"

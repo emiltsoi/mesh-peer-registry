@@ -16,6 +16,8 @@ _ENVELOPE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 # both fields.
 _MESH_ENVELOPE_RE = re.compile(
     r"^\s*\[mesh\](?:\[v:([^\]]+)\])?\[from:([^\]]+)\]\[to:([^\]]+)\]\[id:([^\]]+)\]"
+    r"(?:\[session:([^\]]+)\])?"
+    r"(?:\[from_session:([^\]]+)\])?"
     r"(?:\[action:([^\]]+)\])?(?:\[reply:([^\]]+)\])?"
     r"(?:\[ref:([^\]]+)\])?\s*"
 )
@@ -23,6 +25,8 @@ _MESH_ENVELOPE_RE = re.compile(
 # Strict pattern for outgoing envelopes: action and reply are required.
 _MESH_ENVELOPE_STRICT_RE = re.compile(
     r"^\s*\[mesh\](?:\[v:([^\]]+)\])?\[from:([^\]]+)\]\[to:([^\]]+)\]\[id:([^\]]+)\]"
+    r"(?:\[session:([^\]]+)\])?"
+    r"(?:\[from_session:([^\]]+)\])?"
     r"\[action:([^\]]+)\]\[reply:([^\]]+)\]"
     r"(?:\[ref:([^\]]+)\])?\s*"
 )
@@ -47,6 +51,14 @@ def validate_envelope_token(token: object, field: str = "token") -> str:
     return value
 
 
+# Token-loop parser: accept any field order (robust receivers). The canonical
+# builder order is [from][to][id][session?][from_session?][action][reply][ref],
+# but receivers MUST NOT depend on order — this loop collects every token.
+_FIELD_LOOP_RE = re.compile(
+    r"\[(v|from|to|id|session|from_session|action|reply|ref):([^\]]+)\]"
+)
+
+
 @dataclass(frozen=True)
 class MeshEnvelope:
     """Structured representation of a [mesh] envelope header."""
@@ -58,10 +70,16 @@ class MeshEnvelope:
     reply: Literal["yes", "no", "end"]
     ref: str | None = None
     version: str | None = None
+    session: str | None = None
+    from_session: str | None = None
     body: str = ""
 
     def build(self) -> str:
-        """Build the bracketed [mesh] header for this envelope."""
+        """Build the bracketed [mesh] header for this envelope.
+
+        Canonical token order (normative for build()):
+        [from][to][id][session?][from_session?][action][reply][ref]
+        """
         header = "[mesh]"
         if self.version:
             header += f"[v:{validate_envelope_token(self.version, 'version')}]"
@@ -69,6 +87,12 @@ class MeshEnvelope:
             f"[from:{self.sender}]"
             f"[to:{self.recipient}]"
             f"[id:{self.msg_id}]"
+        )
+        if self.session:
+            header += f"[session:{validate_envelope_token(self.session, 'session')}]"
+        if self.from_session:
+            header += f"[from_session:{validate_envelope_token(self.from_session, 'from_session')}]"
+        header += (
             f"[action:{self.action}]"
             f"[reply:{self.reply}]"
         )
@@ -77,49 +101,83 @@ class MeshEnvelope:
         return f"{header} {self.body}"
 
 
+def _parse_token_loop(text: str) -> tuple[dict[str, str], str]:
+    """Parse the bracketed header with a token loop (order-independent).
+
+    Returns (fields dict, remaining body text). The [mesh] marker is
+    required; every other field is optional and order-free.
+    """
+    if not text.startswith("[mesh]"):
+        raise EnvelopeError("Malformed mesh envelope header")
+
+    # Walk the tokens after the [mesh] marker.
+    fields: dict[str, str] = {}
+    pos = len("[mesh]")
+    while True:
+        token_match = _FIELD_LOOP_RE.match(text, pos)
+        if not token_match:
+            break
+        key, value = token_match.groups()
+        if key == "v":
+            key = "version"
+        fields[key] = value
+        pos = token_match.end()
+    return fields, text[pos:].lstrip()
+
+
 def parse_envelope(text: str) -> MeshEnvelope:
     """Parse a bracketed [mesh] envelope.
 
     Missing action/reply default to the conservative values info/no.
     Raises EnvelopeError for malformed envelopes.
+    Accepts tokens in ANY order (token-loop parser, 0.1.8).
     """
-    m = _MESH_ENVELOPE_RE.match(text)
-    if not m:
+    # Token-loop parser is the primary path (order-independent, 0.1.8).
+    # The regex fast-path would partially match a prefix of a non-canonical
+    # header and treat remaining tokens as body — so we always walk the loop.
+    try:
+        fields, body_text = _parse_token_loop(text)
+    except EnvelopeError:
+        raise
+    if not fields.get("from") or not fields.get("to") or not fields.get("id"):
         raise EnvelopeError("Malformed mesh envelope header")
+    sender = validate_envelope_token(fields["from"], "sender")
+    recipient = validate_envelope_token(fields["to"], "recipient")
+    msg_id = validate_envelope_token(fields["id"], "msg_id")
+    action_raw = fields.get("action", "info")
+    reply_raw = fields.get("reply", "no")
+    ref_raw = fields.get("ref")
+    version_raw = fields.get("version")
+    session_raw = fields.get("session")
+    from_session_raw = fields.get("from_session")
 
-    version, sender, recipient, msg_id, action, reply, ref = m.groups()
-    body_text = text[m.end() :].lstrip()
+    action_val = validate_envelope_token(action_raw or "info", "action")
+    if action_val not in {"do", "info"}:
+        raise EnvelopeError(f"Invalid action: {action_val!r}; must be 'do' or 'info'")
 
-    sender = validate_envelope_token(sender, "sender")
-    recipient = validate_envelope_token(recipient, "recipient")
-    msg_id = validate_envelope_token(msg_id, "msg_id")
+    reply_val = validate_envelope_token(reply_raw or "no", "reply")
+    if reply_val not in {"yes", "no", "end"}:
+        raise EnvelopeError(f"Invalid reply: {reply_val!r}; must be 'yes', 'no', or 'end'")
 
-    action = validate_envelope_token(action or "info", "action")
-    if action not in {"do", "info"}:
-        raise EnvelopeError(f"Invalid action: {action!r}; must be 'do' or 'info'")
-
-    reply = validate_envelope_token(reply or "no", "reply")
-    if reply not in {"yes", "no", "end"}:
-        raise EnvelopeError(f"Invalid reply: {reply!r}; must be 'yes', 'no', or 'end'")
-
-    if ref:
-        ref = validate_envelope_token(ref, "ref")
-    else:
-        ref = None
-
-    if version:
-        version = validate_envelope_token(version, "version")
-    else:
-        version = None
+    ref = validate_envelope_token(ref_raw, "ref") if ref_raw else None
+    version = validate_envelope_token(version_raw, "version") if version_raw else None
+    session = validate_envelope_token(session_raw, "session") if session_raw else None
+    from_session = (
+        validate_envelope_token(from_session_raw, "from_session")
+        if from_session_raw
+        else None
+    )
 
     return MeshEnvelope(
         sender=sender,
         recipient=recipient,
         msg_id=msg_id,
-        action=action,  # type: ignore[arg-type]
-        reply=reply,  # type: ignore[arg-type]
+        action=action_val,  # type: ignore[arg-type]
+        reply=reply_val,  # type: ignore[arg-type]
         ref=ref,
         version=version,
+        session=session,
+        from_session=from_session,
         body=body_text,
     )
 
