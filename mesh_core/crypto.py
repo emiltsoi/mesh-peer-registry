@@ -172,7 +172,7 @@ def verify_message(public_key_input: str, message: str | bytes, signature_b64: s
 
 def canonicalize_json(payload: dict) -> bytes:
     """Return a deterministic JSON encoding of a payload for signing."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def sign_json(private_key_pem: str, payload: dict) -> str:
