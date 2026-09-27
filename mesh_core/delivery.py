@@ -158,6 +158,18 @@ def _pinned_request(
     raise ValueError(f"Could not connect to any resolved IP for {host}")
 
 
+def _is_replay_rejection(exc: Exception) -> bool:
+    """True when `exc` is an HTTP 400 whose body reports a replay hit."""
+    if not isinstance(exc, urllib.error.HTTPError) or exc.code != 400:
+        return False
+    try:
+        payload = json.loads(exc.read().decode())
+    except Exception:  # noqa: BLE001 — unreadable body is just "not a replay"
+        return False
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return isinstance(reason, str) and reason.startswith("Replay:")
+
+
 def _exception_to_reason(exc: Exception) -> str:
     """Map a delivery exception to a short, stable reason code."""
     if isinstance(exc, urllib.error.HTTPError):
@@ -275,6 +287,17 @@ class DeliveryClient:
                 delivery_id = result.get("delivery_id", "unknown")
                 return DeliveryResult(delivery_id=delivery_id)
             except Exception as exc:  # noqa: BLE001
+                if _is_replay_rejection(exc):
+                    # Receivers on older builds answer a replay hit with
+                    # 400 {"status":"rejected","reason":"Replay: ..."}.
+                    # Replay caches only mark ids after acceptance, so this
+                    # means the envelope already arrived — report delivered
+                    # instead of retrying into a false failure.
+                    logger.info(
+                        "Mesh delivery %s already accepted by receiver (replay hit)",
+                        envelope.msg_id,
+                    )
+                    return DeliveryResult(delivery_id=envelope.msg_id)
                 last_exc = exc
                 if attempt < self.retries - 1:
                     sleep_time = min(self.backoff * (2 ** attempt), max(0.0, remaining - 1.0))

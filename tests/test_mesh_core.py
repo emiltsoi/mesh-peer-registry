@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
 
+import mesh_core.delivery as delivery_mod
 from mesh_core import (
     DeliveryClient,
     EnvelopeError,
@@ -304,3 +307,66 @@ def test_delivery_ssrf_blocks_loopback() -> None:
     # CGNAT is always blocked even in loopback-allowed mode.
     result = client.send(env, "http://100.64.0.1:9999/mesh/receive")
     assert result.error == "loopback-blocked"
+
+
+def _delivery_test_client() -> tuple[DeliveryClient, MeshEnvelope]:
+    private, _ = generate_keypair()
+    client = DeliveryClient(
+        private_key_pem=private,
+        retries=3,
+        timeout=5.0,
+        allow_loopback=True,
+        backoff=0.0,
+    )
+    env = MeshEnvelope(
+        sender="hermes-0",
+        recipient="diploid-0",
+        msg_id="dup-msg-1",
+        action="do",
+        reply="yes",
+        body="Hello",
+    )
+    return client, env
+
+
+def _rejecting_post(payload: dict):
+    body = json.dumps(payload).encode()
+
+    def fake_post(*a, **k):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:9/mesh/receive",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(body),
+        )
+
+    return fake_post
+
+
+def test_delivery_replay_rejection_counts_as_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An old-build receiver's 400 {"reason":"Replay: ..."} proves the letter
+    already arrived — report delivered instead of retrying into bad-request."""
+    client, env = _delivery_test_client()
+    monkeypatch.setattr(
+        delivery_mod,
+        "_pinned_request",
+        _rejecting_post(
+            {"status": "rejected", "reason": "Replay: message dup-msg-1 already seen"}
+        ),
+    )
+    result = client.send(env, "http://127.0.0.1:9/mesh/receive")
+    assert result.delivery_id == "dup-msg-1"
+    assert result.error is None
+
+
+def test_delivery_other_rejection_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 400 that is not a replay hit (e.g. THREAD_CLOSED) stays a failure."""
+    client, env = _delivery_test_client()
+    monkeypatch.setattr(
+        delivery_mod,
+        "_pinned_request",
+        _rejecting_post({"status": "rejected", "reason": "THREAD_CLOSED: ref-1"}),
+    )
+    result = client.send(env, "http://127.0.0.1:9/mesh/receive")
+    assert result.error == "bad-request"
