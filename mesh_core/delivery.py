@@ -30,6 +30,10 @@ class DeliveryResult:
 
     delivery_id: str | None = None
     error: str | None = None
+    # Parsed response body on an HTTP rejection (e.g. a thread-gate
+    # refusal's typed fields: reason, retry_after, reroute). None when
+    # the failure produced no parseable body.
+    detail: dict | None = None
 
 
 def _is_ip_blocked(
@@ -145,7 +149,14 @@ def _pinned_request(
             resp = conn.getresponse()
             data = resp.read()
             if resp.status >= 400:
-                raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, resp)
+                err = urllib.error.HTTPError(
+                    url, resp.status, resp.reason, resp.headers, resp
+                )
+                # resp.read() already drained the body; the HTTPError's fp
+                # returns b"" from here on. Stash the bytes so callers
+                # (typed refusals, replay detection) can still read them.
+                err.mesh_body = data  # type: ignore[attr-defined]
+                raise err
             return data
         except (TimeoutError, OSError, http.client.HTTPException) as exc:
             last_exc = exc
@@ -158,14 +169,33 @@ def _pinned_request(
     raise ValueError(f"Could not connect to any resolved IP for {host}")
 
 
+def _error_body_json(exc: Exception) -> dict | None:
+    """Parsed JSON body of an HTTPError, or None.
+
+    Reads the body stashed by ``_pinned_request`` (the fp is already
+    drained by the time the exception escapes); falls back to ``read()``
+    for HTTPErrors from other sources.
+    """
+    if not isinstance(exc, urllib.error.HTTPError):
+        return None
+    raw = getattr(exc, "mesh_body", None)
+    if raw is None:
+        try:
+            raw = exc.read()
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        payload = json.loads(raw.decode())
+    except Exception:  # noqa: BLE001 — unparseable body is just "no detail"
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _is_replay_rejection(exc: Exception) -> bool:
     """True when `exc` is an HTTP 400 whose body reports a replay hit."""
     if not isinstance(exc, urllib.error.HTTPError) or exc.code != 400:
         return False
-    try:
-        payload = json.loads(exc.read().decode())
-    except Exception:  # noqa: BLE001 — unreadable body is just "not a replay"
-        return False
+    payload = _error_body_json(exc)
     reason = payload.get("reason") if isinstance(payload, dict) else None
     return isinstance(reason, str) and reason.startswith("Replay:")
 
@@ -317,6 +347,7 @@ class DeliveryClient:
             dsn_from=dsn_from,
             dsn_to=dsn_to,
             is_dsn=is_dsn,
+            detail=_error_body_json(last_exc) if last_exc else None,
         )
 
     def _fail(
@@ -327,6 +358,7 @@ class DeliveryClient:
         dsn_from: str | None = None,
         dsn_to: str | None = None,
         is_dsn: bool = False,
+        detail: dict | None = None,
     ) -> DeliveryResult:
         if self.dsn_enabled and not is_dsn and dsn_from and dsn_to:
             send_delivery_error(
@@ -339,4 +371,4 @@ class DeliveryClient:
                 private_key_pem=self.private_key_pem,
                 agent_name=self.agent_name,
             )
-        return DeliveryResult(error=reason)
+        return DeliveryResult(error=reason, detail=detail)

@@ -344,6 +344,24 @@ def _rejecting_post(payload: dict):
     return fake_post
 
 
+def _rejecting_post_with_status(payload: dict, status: int, reason: str):
+    """Reject like the real `_pinned_request`: body drained, stashed on the error."""
+    body = json.dumps(payload).encode()
+
+    def fake_post(*a, **k):
+        err = urllib.error.HTTPError(
+            "http://127.0.0.1:9/mesh/receive",
+            status,
+            reason,
+            {},
+            io.BytesIO(b""),  # already-drained fp, as in production
+        )
+        err.mesh_body = body  # type: ignore[attr-defined]
+        raise err
+
+    return fake_post
+
+
 def test_delivery_replay_rejection_counts_as_delivered(monkeypatch: pytest.MonkeyPatch) -> None:
     """An old-build receiver's 400 {"reason":"Replay: ..."} proves the letter
     already arrived — report delivered instead of retrying into bad-request."""
@@ -370,3 +388,51 @@ def test_delivery_other_rejection_still_fails(monkeypatch: pytest.MonkeyPatch) -
     )
     result = client.send(env, "http://127.0.0.1:9/mesh/receive")
     assert result.error == "bad-request"
+
+
+def test_delivery_busy_refusal_surfaces_typed_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread-gate 503's typed body (reason/retry_after/reroute) must
+    reach the sender via DeliveryResult.detail — the refusal address has
+    to be followable, and the real fp is drained before the raise."""
+    client, env = _delivery_test_client()
+    refusal = {
+        "status": "refused",
+        "reason": "busy",
+        "thread_id": "t-1",
+        "peer": "diploid-0",
+        "lease_until": 12345.0,
+        "retry_after": 12345.0,
+        "reroute": {"retry_after": 12345.0},
+    }
+    monkeypatch.setattr(
+        delivery_mod,
+        "_pinned_request",
+        _rejecting_post_with_status(refusal, 503, "Busy"),
+    )
+    result = client.send(env, "http://127.0.0.1:9/mesh/receive")
+    assert result.error == "busy"
+    assert result.detail is not None
+    assert result.detail["reason"] == "busy"
+    assert result.detail["retry_after"] == 12345.0
+
+
+def test_delivery_replay_rejection_survives_drained_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: _pinned_request drains the response before raising —
+    replay detection must read the stashed body, not the empty fp."""
+    client, env = _delivery_test_client()
+    monkeypatch.setattr(
+        delivery_mod,
+        "_pinned_request",
+        _rejecting_post_with_status(
+            {"status": "rejected", "reason": "Replay: message dup-msg-1 already seen"},
+            400,
+            "Bad Request",
+        ),
+    )
+    result = client.send(env, "http://127.0.0.1:9/mesh/receive")
+    assert result.delivery_id == "dup-msg-1"
+    assert result.error is None
