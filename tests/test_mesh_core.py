@@ -141,12 +141,12 @@ def test_session_tokens_optional_and_backward_compatible() -> None:
     assert parsed.from_session is None
 
 
-def test_session_tokens_any_order_parsed() -> None:
-    """0.1.8 token-loop parser: receivers accept any token order."""
-    # session before action, from_session before session (non-canonical order)
+def test_session_tokens_canonical_order_parsed() -> None:
+    """Session tokens parse in canonical order; N11 strictness rejects a
+    non-canonical position rather than reinterpreting the header."""
     text = (
         "[mesh][from:vesper][to:vera][id:msg-2]"
-        "[action:do][from_session:chat][session:review][reply:yes] body"
+        "[session:review][from_session:chat][action:do][reply:yes] body"
     )
     parsed = parse_envelope(text)
     assert parsed.session == "review"
@@ -154,6 +154,13 @@ def test_session_tokens_any_order_parsed() -> None:
     assert parsed.action == "do"
     assert parsed.reply == "yes"
     assert parsed.body == "body"
+
+    # The 0.1.8 any-order form is now an N11 violation, not a variant.
+    with pytest.raises(EnvelopeError, match="position"):
+        parse_envelope(
+            "[mesh][from:vesper][to:vera][id:msg-3]"
+            "[action:do][from_session:chat][session:review][reply:yes] body"
+        )
 
 
 def test_session_token_validation() -> None:
@@ -436,3 +443,73 @@ def test_delivery_replay_rejection_survives_drained_body(
     result = client.send(env, "http://127.0.0.1:9/mesh/receive")
     assert result.delivery_id == "dup-msg-1"
     assert result.error is None
+
+
+def test_delivery_typed_refusal_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal is deterministic state — the delivery loop must not burn
+    its retries against it (the refusal's retry_after is the only retry)."""
+    client, env = _delivery_test_client()
+    calls = []
+
+    def counting_post(*a, **k):
+        calls.append(1)
+        body = json.dumps(
+            {"status": "refused", "reason": "busy", "retry_after": 999.0}
+        ).encode()
+        err = urllib.error.HTTPError(
+            "http://127.0.0.1:9/mesh/receive", 503, "Busy", {}, io.BytesIO(b"")
+        )
+        err.mesh_body = body  # type: ignore[attr-defined]
+        raise err
+
+    monkeypatch.setattr(delivery_mod, "_pinned_request", counting_post)
+    result = client.send(env, "http://127.0.0.1:9/mesh/receive")
+    assert result.error == "busy"
+    assert len(calls) == 1
+
+
+# --- N11: a header parse must be strict, or the gate is optional ---
+
+
+def test_n11_unknown_token_is_rejected_not_decayed() -> None:
+    """The §12.1 decay verbatim: an unknown token used to truncate the
+    header into the body and degrade do/yes to info/no."""
+    with pytest.raises(EnvelopeError, match="unknown token"):
+        parse_envelope(
+            "[mesh][from:a][to:b][id:m1][bogus:t1][action:do][reply:yes] hi"
+        )
+
+
+def test_n11_thread_token_is_whitelisted_not_decaying() -> None:
+    """hermes senders may carry [thread:] — it must parse, not decay."""
+    env = parse_envelope(
+        "[mesh][from:a][to:b][id:m1][thread:t1][action:do][reply:yes] hi"
+    )
+    assert env.action == "do" and env.reply == "yes"
+    env2 = parse_envelope(
+        "[mesh][from:a][to:b][id:m1][action:do][reply:yes][thread:t1] hi"
+    )
+    assert env2.action == "do" and env2.reply == "yes"
+
+
+def test_n11_duplicate_token_rejected() -> None:
+    with pytest.raises(EnvelopeError, match="duplicate"):
+        parse_envelope(
+            "[mesh][from:a][to:b][id:m1][action:do][reply:yes][reply:no] hi"
+        )
+
+
+def test_n11_out_of_position_token_rejected() -> None:
+    with pytest.raises(EnvelopeError, match="position"):
+        parse_envelope(
+            "[mesh][from:a][to:b][id:m1][reply:yes][action:do] hi"
+        )
+
+
+def test_n11_body_with_non_token_brackets_still_legal() -> None:
+    env = parse_envelope(
+        "[mesh][from:a][to:b][id:m1][action:do][reply:yes] [note] plain body"
+    )
+    assert env.body == "[note] plain body"

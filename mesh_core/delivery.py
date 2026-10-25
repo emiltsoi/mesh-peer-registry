@@ -182,6 +182,9 @@ def _error_body_json(exc: Exception) -> dict | None:
     if raw is None:
         try:
             raw = exc.read()
+            # Reading an fp consumes it — stash so later readers (replay
+            # detection, detail extraction) see the same bytes.
+            exc.mesh_body = raw  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             return None
     try:
@@ -317,6 +320,14 @@ class DeliveryClient:
                 delivery_id = result.get("delivery_id", "unknown")
                 return DeliveryResult(delivery_id=delivery_id)
             except Exception as exc:  # noqa: BLE001
+                refusal = _error_body_json(exc)
+                if refusal and refusal.get("status") == "refused":
+                    # A typed refusal is deterministic state — retrying in
+                    # the delivery loop contradicts the refusal's own
+                    # retry_after (seconds of backoff vs the lease's term).
+                    # Stop now and let the sender follow the address.
+                    last_exc = exc
+                    break
                 if _is_replay_rejection(exc):
                     # Receivers on older builds answer a replay hit with
                     # 400 {"status":"rejected","reason":"Replay: ..."}.
