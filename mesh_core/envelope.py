@@ -51,12 +51,29 @@ def validate_envelope_token(token: object, field: str = "token") -> str:
     return value
 
 
-# Token-loop parser: accept any field order (robust receivers). The canonical
-# builder order is [from][to][id][session?][from_session?][action][reply][ref],
-# but receivers MUST NOT depend on order — this loop collects every token.
-_FIELD_LOOP_RE = re.compile(
-    r"\[(v|from|to|id|session|from_session|action|reply|ref):([^\]]+)\]"
-)
+# Token-loop parser (N11 — strict). The loop recognizes ANY token-shaped
+# `[k:v]` bracket so an unknown token can be REJECTED instead of silently
+# truncating the header into the body (the fail-open decay where
+# `[id:m1][thread:t1][action:do][reply:yes]` read as action=info reply=no).
+_FIELD_LOOP_RE = re.compile(r"\[([A-Za-z_][A-Za-z0-9_]*):([^\]]+)\]")
+
+# Known header keys in canonical order (the order build() emits). `thread`
+# is whitelisted — hermes senders carry it — but deliberately holds no
+# canonical position: it may appear anywhere after `id` and is not relied
+# upon (spec §12.1 — the thread id lives on ref + the registry).
+_KNOWN_TOKENS = {
+    "v": 0,
+    "from": 1,
+    "to": 2,
+    "id": 3,
+    "session": 4,
+    "from_session": 5,
+    "action": 6,
+    "reply": 7,
+    "ref": 8,
+}
+_FLEX_TOKENS = {"thread"}
+
 
 
 @dataclass(frozen=True)
@@ -102,25 +119,44 @@ class MeshEnvelope:
 
 
 def _parse_token_loop(text: str) -> tuple[dict[str, str], str]:
-    """Parse the bracketed header with a token loop (order-independent).
+    """Parse the bracketed header with a strict token loop (N11).
 
     Returns (fields dict, remaining body text). The [mesh] marker is
-    required; every other field is optional and order-free.
+    required. A message whose header cannot be parsed unambiguously is
+    rejected, not reinterpreted: unknown tokens, duplicate tokens, and
+    canonical-order violations all raise EnvelopeError. `thread` is
+    whitelisted and position-flexible after `id` for hermes interop.
     """
     if not text.startswith("[mesh]"):
         raise EnvelopeError("Malformed mesh envelope header")
 
-    # Walk the tokens after the [mesh] marker.
     fields: dict[str, str] = {}
+    seen: set[str] = set()
     pos = len("[mesh]")
+    last_order = -1
     while True:
         token_match = _FIELD_LOOP_RE.match(text, pos)
         if not token_match:
             break
         key, value = token_match.groups()
-        if key == "v":
-            key = "version"
-        fields[key] = value
+        if key in _FLEX_TOKENS:
+            if last_order < _KNOWN_TOKENS["id"]:
+                raise EnvelopeError(f"Mesh envelope token out of position: [{key}:]")
+            if key in seen:
+                raise EnvelopeError(f"Mesh envelope duplicate token: [{key}:{value}]")
+            seen.add(key)
+            fields[key] = value
+            pos = token_match.end()
+            continue
+        if key not in _KNOWN_TOKENS:
+            raise EnvelopeError(f"Mesh envelope unknown token: [{key}:{value}]")
+        if key in seen:
+            raise EnvelopeError(f"Mesh envelope duplicate token: [{key}:{value}]")
+        if _KNOWN_TOKENS[key] <= last_order:
+            raise EnvelopeError(f"Mesh envelope token out of position: [{key}:{value}]")
+        seen.add(key)
+        last_order = _KNOWN_TOKENS[key]
+        fields["version" if key == "v" else key] = value
         pos = token_match.end()
     return fields, text[pos:].lstrip()
 

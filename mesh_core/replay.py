@@ -40,6 +40,12 @@ class ReplayWindow:
         self._seen[msg_id] = time.time()
         self._seen.move_to_end(msg_id)
 
+    def discard(self, msg_id: str) -> None:
+        """Un-record a message id — used when an accepted delivery could not
+        actually be handed onward (e.g. wake enqueue failed), so the sender's
+        retry is verified fresh instead of being swallowed as a duplicate."""
+        self._seen.pop(msg_id, None)
+
     def clear(self) -> None:
         """Clear the replay window."""
         self._seen.clear()
