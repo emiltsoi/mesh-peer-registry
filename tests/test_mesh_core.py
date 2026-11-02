@@ -316,6 +316,30 @@ def test_delivery_ssrf_blocks_loopback() -> None:
     assert result.error == "loopback-blocked"
 
 
+def test_delivery_ssrf_block_names_remediation() -> None:
+    """A policy refusal must carry the knobs that would admit the target."""
+    private, _ = generate_keypair()
+    client = DeliveryClient(
+        private_key_pem=private,
+        retries=1,
+        timeout=1.0,
+        dsn_enabled=False,
+    )
+    env = MeshEnvelope(
+        sender="hermes-0",
+        recipient="diploid-0",
+        msg_id="msg-1",
+        action="do",
+        reply="yes",
+        body="Hello",
+    )
+    result = client.send(env, "http://192.168.1.48:8760/mesh/receive", allow_loopback=False)
+    assert result.error == "loopback-blocked"
+    assert result.detail is not None
+    assert "allow_loopback" in result.detail["hint"]
+    assert "MESH_ALLOW_LOOPBACK" in result.detail["hint"]
+
+
 def _delivery_test_client() -> tuple[DeliveryClient, MeshEnvelope]:
     private, _ = generate_keypair()
     client = DeliveryClient(

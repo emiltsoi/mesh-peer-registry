@@ -276,12 +276,24 @@ class DeliveryClient:
             url, resolved_ip_objs = _resolve_target_url(target_url, allow_loopback=allow_loopback)
         except ValueError as exc:
             reason = "loopback-blocked" if "blocked" in str(exc).lower() else "unreachable"
+            detail = None
+            if reason == "loopback-blocked":
+                # Name the admitting knobs in the refusal itself — a bare
+                # reason sent a peer chasing a fault on the wrong side.
+                detail = {
+                    "hint": (
+                        "target IP is loopback/private/link-local and was refused by "
+                        "the sender-side SSRF policy; admit it via the peer identity's "
+                        "allow_loopback flag or MESH_ALLOW_LOOPBACK=1"
+                    )
+                }
             return self._fail(
                 envelope,
                 reason,
                 dsn_from=dsn_from,
                 dsn_to=dsn_to,
                 is_dsn=is_dsn,
+                detail=detail,
             )
 
         timestamp = str(time.time())
